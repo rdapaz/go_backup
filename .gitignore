@@ -1,0 +1,30 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Output from go build
+/backup
+/restore
+
+# Go build artifacts
+*.test
+
+# Temporary directories
+tmp/
+temp/
+
+# IDE project files
+.vscode/
+.idea/
+*.iml
+
+# OS-specific junk
+.DS_Store
+Thumbs.db
+
+# Backup staging folders (if accidentally generated in repo)
+202*/
+*.7z
