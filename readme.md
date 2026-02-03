@@ -1,7 +1,16 @@
 readme.md
 ---------
 
-Example usage:
+# Go Backup Tool
+
+Parallelized encrypted backup tool with:
+- SHA-256 deduplication
+- 7z AES-256 encryption
+- SQLite metadata
+- Profiles: documents, jetbrains, databases, photos
+- Windows/macOS/Linux compatible
+
+## Usage
 
 .\backup.exe -src "C:\Users\RicardodaPaz\Pictures" -dst "D:\Backups" -profile photos -hint "All photos Jan 2026"
 
