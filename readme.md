@@ -101,6 +101,10 @@ backup-cli restore -dst <restoreDir> -stage <stagingDir>
 | `photos` | .jpg, .jpeg, .png, .tif, .tiff, .bmp, .gif, .heic, .heif |
 | `jetbrains` | All files except excluded dirs (.git, node_modules, .venv, etc.) and workspace.xml |
 
+## Downloads
+
+Pre-built binaries for Windows, macOS, and Linux are available on the [Releases](https://github.com/rdapaz/go_backup/releases) page.
+
 ## Archive Format
 
 Each backup produces an encrypted 7z archive containing:
@@ -113,3 +117,7 @@ Each backup produces an encrypted 7z archive containing:
     ├── <sha256hash2>
     └── ...
 ```
+
+## License
+
+[MIT](LICENSE)
