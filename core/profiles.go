@@ -75,25 +75,12 @@ func IsValidProfile(p string) bool {
 // during backup scans. These are common Windows system/app directories inside
 // user profiles that contain images, documents etc. that are not user content.
 var DefaultBlocklistDirs = []string{
+	// Windows system/app directories
 	"AppData",
 	"Application Data",
 	"Local Settings",
 	"$Recycle.Bin",
 	"System Volume Information",
-	".cache",
-	".vscode",
-	".config",
-	".local",
-	".npm",
-	".nuget",
-	".dotnet",
-	".gradle",
-	".m2",
-	"node_modules",
-	"__pycache__",
-	".git",
-	".svn",
-	".hg",
 	"Cookies",
 	"NetHood",
 	"PrintHood",
@@ -102,6 +89,43 @@ var DefaultBlocklistDirs = []string{
 	"Start Menu",
 	"Templates",
 	"MicrosoftEdgeBackups",
-	".thumbnails",
 	"Thumbs.db",
+	// Version control
+	".git",
+	".svn",
+	".hg",
+	// Python
+	".venv",
+	"venv",
+	"env",
+	"__pycache__",
+	".tox",
+	".mypy_cache",
+	".pytest_cache",
+	".eggs",
+	// Node / JS
+	"node_modules",
+	".npm",
+	// Go
+	"vendor",
+	// .NET
+	"bin",
+	"obj",
+	// JVM
+	".gradle",
+	".m2",
+	"target",
+	"build",
+	// IDE / editor
+	".vscode",
+	".idea",
+	// General caches & config
+	".cache",
+	".config",
+	".local",
+	".nuget",
+	".dotnet",
+	".thumbnails",
+	".pants.d",
+	"dist",
 }
