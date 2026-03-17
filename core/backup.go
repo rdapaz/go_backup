@@ -280,21 +280,33 @@ func runBackupPipeline(
 }
 
 func ShouldBackup(path string, profile string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
 	switch profile {
 	case ProfileDocuments:
-		_, ok := DocumentExts[strings.ToLower(filepath.Ext(path))]
+		_, ok := DocumentExts[ext]
 		return ok
 	case ProfileDatabases:
-		_, ok := DatabaseExts[strings.ToLower(filepath.Ext(path))]
+		_, ok := DatabaseExts[ext]
 		return ok
 	case ProfilePhotos:
-		_, ok := PhotoExts[strings.ToLower(filepath.Ext(path))]
+		_, ok := PhotoExts[ext]
 		return ok
 	case ProfileJetBrains:
 		if _, skip := JBExcludeFileNames[filepath.Base(path)]; skip {
 			return false
 		}
 		return true
+	case ProfileAll:
+		if _, ok := DocumentExts[ext]; ok {
+			return true
+		}
+		if _, ok := DatabaseExts[ext]; ok {
+			return true
+		}
+		if _, ok := PhotoExts[ext]; ok {
+			return true
+		}
+		return false
 	}
 	return false
 }

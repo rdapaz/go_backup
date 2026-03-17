@@ -37,7 +37,7 @@ func runBackupCLI(args []string) {
 	fs.StringVar(&cfg.DstDir, "dst", "", "Destination root directory for backups")
 	fs.StringVar(&cfg.Password, "password", "", "Password for 7z archive (auto-generated if empty)")
 	fs.StringVar(&cfg.PasswordHint, "hint", "", "Optional password hint")
-	fs.StringVar(&cfg.Profile, "profile", core.ProfileDocuments, "Backup profile: documents|jetbrains|databases|photos")
+	fs.StringVar(&cfg.Profile, "profile", core.ProfileAll, "Backup profile: all|documents|jetbrains|databases|photos")
 	fs.IntVar(&cfg.Workers, "workers", runtime.NumCPU(), "Number of concurrent workers")
 	fs.BoolVar(&cfg.KeepStage, "keep-stage", false, "Keep staging directory after 7z creation")
 	fs.Parse(args)

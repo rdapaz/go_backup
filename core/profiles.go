@@ -5,9 +5,10 @@ const (
 	ProfileJetBrains = "jetbrains"
 	ProfileDatabases = "databases"
 	ProfilePhotos    = "photos"
+	ProfileAll       = "all"
 )
 
-var ValidProfiles = []string{ProfileDocuments, ProfileJetBrains, ProfileDatabases, ProfilePhotos}
+var ValidProfiles = []string{ProfileAll, ProfileDocuments, ProfileJetBrains, ProfileDatabases, ProfilePhotos}
 
 var DocumentExts = map[string]struct{}{
 	".doc":  {},
@@ -64,7 +65,7 @@ var JBExcludeFileNames = map[string]struct{}{
 
 func IsValidProfile(p string) bool {
 	switch p {
-	case ProfileDocuments, ProfileJetBrains, ProfileDatabases, ProfilePhotos:
+	case ProfileDocuments, ProfileJetBrains, ProfileDatabases, ProfilePhotos, ProfileAll:
 		return true
 	}
 	return false
