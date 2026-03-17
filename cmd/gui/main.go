@@ -30,7 +30,7 @@ func main() {
 
 	tabs := container.NewAppTabs(
 		container.NewTabItemWithIcon("Backup", theme.UploadIcon(), makeBackupTab(a, w)),
-		container.NewTabItemWithIcon("Restore", theme.DownloadIcon(), makeRestoreTab(w)),
+		container.NewTabItemWithIcon("Restore", theme.DownloadIcon(), makeRestoreTab(a, w)),
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
 
@@ -233,8 +233,12 @@ func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 					statusLabel.SetText("Failed")
 					appendLog(fmt.Sprintf("ERROR: %v", err))
 
-					// If we have a staging directory, tell the user
+					// If we have a staging directory, tell the user and save for restore tab
 					if result != nil && result.StageDirPath != "" {
+						prefs.SetString("last_stage_dir", result.StageDirPath)
+						if result.Password != "" {
+							prefs.SetString("last_password", result.Password)
+						}
 						appendLog(fmt.Sprintf("Staging directory preserved at: %s", result.StageDirPath))
 						appendLog("You can restore from this using the Restore tab → 'From Staging Directory'.")
 						dialog.ShowInformation("Backup Failed — Staging Preserved",
@@ -250,6 +254,13 @@ func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 			appendLog(fmt.Sprintf("Archive: %s", result.ArchivePath))
 			if cfg.Password == "" {
 				appendLog(fmt.Sprintf("Generated password: %s", result.Password))
+			}
+
+			// Save last backup details for restore tab
+			prefs.SetString("last_archive", result.ArchivePath)
+			prefs.SetString("last_password", result.Password)
+			if result.StageDirPath != "" {
+				prefs.SetString("last_stage_dir", result.StageDirPath)
 			}
 
 			dialog.ShowInformation("Backup Complete",
@@ -286,7 +297,9 @@ func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 
 // ---------- Restore Tab ----------
 
-func makeRestoreTab(w fyne.Window) fyne.CanvasObject {
+func makeRestoreTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
+	prefs := a.Preferences()
+
 	modeSelect := widget.NewSelect([]string{"From Archive", "From Staging Directory"}, nil)
 	modeSelect.SetSelected("From Archive")
 
@@ -318,6 +331,17 @@ func makeRestoreTab(w fyne.Window) fyne.CanvasObject {
 	passwordEntry := widget.NewPasswordEntry()
 	passwordEntry.SetPlaceHolder("Archive password")
 	passwordRow := container.NewBorder(nil, nil, widget.NewLabel("Password:"), nil, passwordEntry)
+
+	// Pre-populate from last backup
+	if lastArchive := prefs.String("last_archive"); lastArchive != "" {
+		archiveEntry.SetText(lastArchive)
+	}
+	if lastPassword := prefs.String("last_password"); lastPassword != "" {
+		passwordEntry.SetText(lastPassword)
+	}
+	if lastStage := prefs.String("last_stage_dir"); lastStage != "" {
+		stageEntry.SetText(lastStage)
+	}
 
 	modeSelect.OnChanged = func(s string) {
 		if s == "From Archive" {
