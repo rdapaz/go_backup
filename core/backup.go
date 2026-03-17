@@ -297,16 +297,8 @@ func ShouldBackup(path string, profile string) bool {
 		}
 		return true
 	case ProfileAll:
-		if _, ok := DocumentExts[ext]; ok {
-			return true
-		}
-		if _, ok := DatabaseExts[ext]; ok {
-			return true
-		}
-		if _, ok := PhotoExts[ext]; ok {
-			return true
-		}
-		return false
+		// Back up everything — the blocklist handles directory filtering
+		return true
 	}
 	return false
 }

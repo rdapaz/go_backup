@@ -104,7 +104,7 @@ func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 	})
 
 	profileSelect := widget.NewSelect(core.ValidProfiles, nil)
-	profileSelect.SetSelected(core.ProfileDocuments)
+	profileSelect.SetSelected(core.ProfileAll)
 
 	passwordEntry := widget.NewPasswordEntry()
 	passwordEntry.SetPlaceHolder("Leave empty to auto-generate")
