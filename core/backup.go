@@ -27,12 +27,14 @@ type BackupConfig struct {
 	PasswordHint string
 	Workers      int
 	KeepStage    bool
+	Blocklist    []string // directory names to skip during walk
 }
 
 type BackupResult struct {
-	ArchivePath string
-	Password    string
-	FileCount   int64
+	ArchivePath  string
+	Password     string
+	FileCount    int64
+	StageDirPath string // populated even on failure so user can recover
 }
 
 type fileJob struct {
@@ -119,24 +121,37 @@ func RunBackup(ctx context.Context, cfg BackupConfig, log LogFunc) (*BackupResul
 		return nil, fmt.Errorf("store password hash: %w", err)
 	}
 
-	log(fmt.Sprintf("Starting backup  Source: %s  Dest: %s  Profile: %s", srcDirAbs, dstDirAbs, cfg.Profile))
+	// Build blocklist lookup set
+	blockSet := make(map[string]struct{}, len(cfg.Blocklist))
+	for _, b := range cfg.Blocklist {
+		blockSet[b] = struct{}{}
+	}
 
-	fileCount, err := runBackupPipeline(ctx, srcDirAbs, stageDir, dataDir, db, backupID, cfg.Workers, cfg.Profile, log)
+	log(fmt.Sprintf("Starting backup  Source: %s  Dest: %s  Profile: %s", srcDirAbs, dstDirAbs, cfg.Profile))
+	if len(blockSet) > 0 {
+		log(fmt.Sprintf("Blocklist: %d directory names will be skipped", len(blockSet)))
+	}
+
+	fileCount, err := runBackupPipeline(ctx, srcDirAbs, stageDir, dataDir, db, backupID, cfg.Workers, cfg.Profile, blockSet, log)
 	if err != nil {
 		db.Close()
-		return nil, err
+		return &BackupResult{StageDirPath: stageDir, FileCount: 0, Password: password}, err
 	}
 
 	// Close DB before 7z reads it (Windows file lock)
 	if err := db.Close(); err != nil {
-		return nil, fmt.Errorf("close db: %w", err)
+		return &BackupResult{StageDirPath: stageDir, FileCount: fileCount, Password: password},
+			fmt.Errorf("close db: %w", err)
 	}
 
 	log("File staging complete, creating 7z archive...")
 
 	archivePath := filepath.Join(dstDirAbs, archiveBase+".7z")
 	if err := Create7zArchive(dstDirAbs, archiveBase, archivePath, password, log); err != nil {
-		return nil, fmt.Errorf("7z archive: %w", err)
+		log(fmt.Sprintf("WARNING: 7z failed but staging directory preserved at: %s", stageDir))
+		log("You can restore directly from the staging directory using the Restore tab.")
+		return &BackupResult{StageDirPath: stageDir, FileCount: fileCount, Password: password},
+			fmt.Errorf("7z archive: %w", err)
 	}
 
 	log(fmt.Sprintf("Archive created: %s", archivePath))
@@ -149,9 +164,10 @@ func RunBackup(ctx context.Context, cfg BackupConfig, log LogFunc) (*BackupResul
 	}
 
 	return &BackupResult{
-		ArchivePath: archivePath,
-		Password:    password,
-		FileCount:   fileCount,
+		ArchivePath:  archivePath,
+		Password:     password,
+		FileCount:    fileCount,
+		StageDirPath: stageDir,
 	}, nil
 }
 
@@ -169,6 +185,7 @@ func runBackupPipeline(
 	backupID int64,
 	workers int,
 	profile string,
+	blockSet map[string]struct{},
 	log LogFunc,
 ) (int64, error) {
 	jobs := make(chan fileJob, workers*2)
@@ -215,13 +232,17 @@ func runBackupPipeline(
 			return err
 		}
 
-		if profile == ProfileJetBrains && d.IsDir() {
-			if _, skip := JBExcludeDirNames[d.Name()]; skip {
+		if d.IsDir() {
+			// Blocklist applies to all profiles
+			if _, skip := blockSet[d.Name()]; skip {
 				return fs.SkipDir
 			}
-		}
-
-		if d.IsDir() {
+			// JetBrains-specific directory exclusions
+			if profile == ProfileJetBrains {
+				if _, skip := JBExcludeDirNames[d.Name()]; skip {
+					return fs.SkipDir
+				}
+			}
 			return nil
 		}
 

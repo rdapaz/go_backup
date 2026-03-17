@@ -69,3 +69,38 @@ func IsValidProfile(p string) bool {
 	}
 	return false
 }
+
+// DefaultBlocklistDirs contains directory names that are skipped by default
+// during backup scans. These are common Windows system/app directories inside
+// user profiles that contain images, documents etc. that are not user content.
+var DefaultBlocklistDirs = []string{
+	"AppData",
+	"Application Data",
+	"Local Settings",
+	"$Recycle.Bin",
+	"System Volume Information",
+	".cache",
+	".vscode",
+	".config",
+	".local",
+	".npm",
+	".nuget",
+	".dotnet",
+	".gradle",
+	".m2",
+	"node_modules",
+	"__pycache__",
+	".git",
+	".svn",
+	".hg",
+	"Cookies",
+	"NetHood",
+	"PrintHood",
+	"Recent",
+	"SendTo",
+	"Start Menu",
+	"Templates",
+	"MicrosoftEdgeBackups",
+	".thumbnails",
+	"Thumbs.db",
+}

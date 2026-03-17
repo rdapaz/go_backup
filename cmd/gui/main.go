@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"runtime"
 	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
@@ -18,13 +20,16 @@ import (
 	"mybackup/core"
 )
 
+var crtGreen = color.RGBA{R: 0, G: 255, B: 65, A: 255}
+
 func main() {
-	a := app.New()
+	a := app.NewWithID("com.gobackup.app")
+	a.Settings().SetTheme(theme.DarkTheme())
 	w := a.NewWindow("Go Backup")
-	w.Resize(fyne.NewSize(720, 580))
+	w.Resize(fyne.NewSize(780, 620))
 
 	tabs := container.NewAppTabs(
-		container.NewTabItemWithIcon("Backup", theme.UploadIcon(), makeBackupTab(w)),
+		container.NewTabItemWithIcon("Backup", theme.UploadIcon(), makeBackupTab(a, w)),
 		container.NewTabItemWithIcon("Restore", theme.DownloadIcon(), makeRestoreTab(w)),
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
@@ -33,9 +38,51 @@ func main() {
 	w.ShowAndRun()
 }
 
+// crtLog creates a CRT-style green-on-black log display.
+// Returns the container, an append function, and a clear function.
+func crtLog() (fyne.CanvasObject, func(string), func()) {
+	var lines []string
+
+	list := widget.NewList(
+		func() int { return len(lines) },
+		func() fyne.CanvasObject {
+			t := canvas.NewText("template", crtGreen)
+			t.TextStyle = fyne.TextStyle{Monospace: true}
+			t.TextSize = 13
+			return t
+		},
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			t := obj.(*canvas.Text)
+			if id < len(lines) {
+				t.Text = lines[id]
+			}
+			t.Color = crtGreen
+			t.Refresh()
+		},
+	)
+
+	bg := canvas.NewRectangle(color.Black)
+	logContainer := container.NewStack(bg, list)
+
+	appendFn := func(msg string) {
+		ts := time.Now().Format("15:04:05")
+		line := fmt.Sprintf("[%s] %s", ts, msg)
+		lines = append(lines, line)
+		list.Refresh()
+		list.ScrollToBottom()
+	}
+
+	clearFn := func() {
+		lines = nil
+		list.Refresh()
+	}
+
+	return logContainer, appendFn, clearFn
+}
+
 // ---------- Backup Tab ----------
 
-func makeBackupTab(w fyne.Window) fyne.CanvasObject {
+func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 	srcEntry := widget.NewEntry()
 	srcEntry.SetPlaceHolder("Source directory")
 	srcBrowse := widget.NewButtonWithIcon("Browse", theme.FolderOpenIcon(), func() {
@@ -75,9 +122,55 @@ func makeBackupTab(w fyne.Window) fyne.CanvasObject {
 
 	keepStageCheck := widget.NewCheck("Keep staging directory", nil)
 
-	logOutput := widget.NewMultiLineEntry()
-	logOutput.Wrapping = fyne.TextWrapWord
-	logOutput.Disable()
+	// --- Blocklist ---
+	// Load saved blocklist or use defaults
+	prefs := a.Preferences()
+	savedBlocklist := prefs.StringWithFallback("blocklist", "")
+	var blocklist []string
+	if savedBlocklist == "" {
+		blocklist = append([]string{}, core.DefaultBlocklistDirs...)
+	} else {
+		blocklist = strings.Split(savedBlocklist, "\n")
+	}
+
+	blocklistBtn := widget.NewButtonWithIcon("Edit Blocklist...", theme.SettingsIcon(), nil)
+	blocklistBtn.OnTapped = func() {
+		entry := widget.NewMultiLineEntry()
+		entry.SetText(strings.Join(blocklist, "\n"))
+		entry.SetMinRowsVisible(15)
+		entry.Wrapping = fyne.TextWrapOff
+
+		resetBtn := widget.NewButton("Reset to Defaults", func() {
+			entry.SetText(strings.Join(core.DefaultBlocklistDirs, "\n"))
+		})
+
+		content := container.NewBorder(
+			widget.NewLabel("One directory name per line.\nThese directories will be skipped during scanning."),
+			resetBtn,
+			nil, nil,
+			entry,
+		)
+
+		d := dialog.NewCustomConfirm("Blocklist — Directories to Skip", "Save", "Cancel", content, func(save bool) {
+			if save {
+				text := strings.TrimSpace(entry.Text)
+				var cleaned []string
+				for _, line := range strings.Split(text, "\n") {
+					line = strings.TrimSpace(line)
+					if line != "" {
+						cleaned = append(cleaned, line)
+					}
+				}
+				blocklist = cleaned
+				prefs.SetString("blocklist", strings.Join(blocklist, "\n"))
+			}
+		}, w)
+		d.Resize(fyne.NewSize(450, 450))
+		d.Show()
+	}
+
+	// CRT-style log
+	logContainer, appendLog, clearLog := crtLog()
 
 	progress := widget.NewProgressBarInfinite()
 	progress.Hide()
@@ -89,13 +182,6 @@ func makeBackupTab(w fyne.Window) fyne.CanvasObject {
 	startBtn := widget.NewButtonWithIcon("Start Backup", theme.MediaPlayIcon(), nil)
 	cancelBtn := widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), nil)
 	cancelBtn.Disable()
-
-	appendLog := func(msg string) {
-		ts := time.Now().Format("15:04:05")
-		line := fmt.Sprintf("[%s] %s\n", ts, msg)
-		logOutput.SetText(logOutput.Text + line)
-		logOutput.CursorRow = strings.Count(logOutput.Text, "\n")
-	}
 
 	startBtn.OnTapped = func() {
 		src := strings.TrimSpace(srcEntry.Text)
@@ -118,9 +204,10 @@ func makeBackupTab(w fyne.Window) fyne.CanvasObject {
 			PasswordHint: hintEntry.Text,
 			Workers:      int(workersSlider.Value),
 			KeepStage:    keepStageCheck.Checked,
+			Blocklist:    blocklist,
 		}
 
-		logOutput.SetText("")
+		clearLog()
 		progress.Show()
 		startBtn.Disable()
 		cancelBtn.Enable()
@@ -130,13 +217,9 @@ func makeBackupTab(w fyne.Window) fyne.CanvasObject {
 		ctx, cancelFunc = context.WithCancel(context.Background())
 
 		go func() {
-			log := func(msg string) {
-				// Fyne requires UI updates from any goroutine to be safe;
-				// Entry.SetText is goroutine-safe in Fyne.
+			result, err := core.RunBackup(ctx, cfg, func(msg string) {
 				appendLog(msg)
-			}
-
-			result, err := core.RunBackup(ctx, cfg, log)
+			})
 
 			progress.Hide()
 			cancelBtn.Disable()
@@ -149,6 +232,15 @@ func makeBackupTab(w fyne.Window) fyne.CanvasObject {
 				} else {
 					statusLabel.SetText("Failed")
 					appendLog(fmt.Sprintf("ERROR: %v", err))
+
+					// If we have a staging directory, tell the user
+					if result != nil && result.StageDirPath != "" {
+						appendLog(fmt.Sprintf("Staging directory preserved at: %s", result.StageDirPath))
+						appendLog("You can restore from this using the Restore tab → 'From Staging Directory'.")
+						dialog.ShowInformation("Backup Failed — Staging Preserved",
+							fmt.Sprintf("The backup failed but %d files were staged to:\n%s\n\nYou can restore from this directory using the Restore tab.",
+								result.FileCount, result.StageDirPath), w)
+					}
 				}
 				return
 			}
@@ -176,7 +268,7 @@ func makeBackupTab(w fyne.Window) fyne.CanvasObject {
 	form := container.NewVBox(
 		container.NewBorder(nil, nil, widget.NewLabel("Source:"), srcBrowse, srcEntry),
 		container.NewBorder(nil, nil, widget.NewLabel("Destination:"), dstBrowse, dstEntry),
-		container.NewBorder(nil, nil, widget.NewLabel("Profile:"), nil, profileSelect),
+		container.NewBorder(nil, nil, widget.NewLabel("Profile:"), blocklistBtn, profileSelect),
 		container.NewBorder(nil, nil, widget.NewLabel("Password:"), nil, passwordEntry),
 		container.NewBorder(nil, nil, widget.NewLabel("Hint:"), nil, hintEntry),
 		container.NewBorder(nil, nil, workersLabel, nil, workersSlider),
@@ -185,13 +277,10 @@ func makeBackupTab(w fyne.Window) fyne.CanvasObject {
 
 	buttons := container.NewHBox(startBtn, cancelBtn, layout.NewSpacer(), statusLabel)
 
-	logScroll := container.NewScroll(logOutput)
-	logScroll.SetMinSize(fyne.NewSize(0, 200))
-
 	return container.NewBorder(
 		container.NewVBox(form, buttons, progress),
 		nil, nil, nil,
-		logScroll,
+		logContainer,
 	)
 }
 
@@ -260,9 +349,8 @@ func makeRestoreTab(w fyne.Window) fyne.CanvasObject {
 		workersLabel.SetText(fmt.Sprintf("Workers: %d", int(v)))
 	}
 
-	logOutput := widget.NewMultiLineEntry()
-	logOutput.Wrapping = fyne.TextWrapWord
-	logOutput.Disable()
+	// CRT-style log
+	logContainer, appendLog, clearLog := crtLog()
 
 	progress := widget.NewProgressBarInfinite()
 	progress.Hide()
@@ -270,13 +358,6 @@ func makeRestoreTab(w fyne.Window) fyne.CanvasObject {
 	statusLabel := widget.NewLabel("Ready")
 
 	startBtn := widget.NewButtonWithIcon("Start Restore", theme.MediaPlayIcon(), nil)
-
-	appendLog := func(msg string) {
-		ts := time.Now().Format("15:04:05")
-		line := fmt.Sprintf("[%s] %s\n", ts, msg)
-		logOutput.SetText(logOutput.Text + line)
-		logOutput.CursorRow = strings.Count(logOutput.Text, "\n")
-	}
 
 	startBtn.OnTapped = func() {
 		dst := strings.TrimSpace(dstEntry.Text)
@@ -311,17 +392,15 @@ func makeRestoreTab(w fyne.Window) fyne.CanvasObject {
 			cfg.StageDir = stage
 		}
 
-		logOutput.SetText("")
+		clearLog()
 		progress.Show()
 		startBtn.Disable()
 		statusLabel.SetText("Restoring...")
 
 		go func() {
-			log := func(msg string) {
+			result, err := core.RunRestore(cfg, func(msg string) {
 				appendLog(msg)
-			}
-
-			result, err := core.RunRestore(cfg, log)
+			})
 
 			progress.Hide()
 			startBtn.Enable()
@@ -357,12 +436,9 @@ func makeRestoreTab(w fyne.Window) fyne.CanvasObject {
 
 	buttons := container.NewHBox(startBtn, layout.NewSpacer(), statusLabel)
 
-	logScroll := container.NewScroll(logOutput)
-	logScroll.SetMinSize(fyne.NewSize(0, 200))
-
 	return container.NewBorder(
 		container.NewVBox(form, buttons, progress),
 		nil, nil, nil,
-		logScroll,
+		logContainer,
 	)
 }
