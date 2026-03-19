@@ -1,9 +1,10 @@
 module mybackup
 
-go 1.20
+go 1.23
 
 require (
 	fyne.io/fyne/v2 v2.4.5
+	github.com/klauspost/compress v1.18.4
 	github.com/mattn/go-sqlite3 v1.14.22
 	golang.org/x/crypto v0.22.0
 )

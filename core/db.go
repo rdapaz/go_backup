@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS backups (
     profile       TEXT NOT NULL,
     password_hash TEXT,
     kdf_salt      BLOB,
-    password_hint TEXT
+    password_hint TEXT,
+    description   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS contents (
@@ -50,10 +51,10 @@ func InitDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-func CreateBackupRecord(db *sql.DB, archiveName, profile, passwordHint string) (int64, error) {
+func CreateBackupRecord(db *sql.DB, archiveName, profile, passwordHint, description string) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := db.Exec(`INSERT INTO backups (archive_name, created_at, profile, password_hint) VALUES (?, ?, ?, ?)`,
-		archiveName, now, profile, passwordHint)
+	res, err := db.Exec(`INSERT INTO backups (archive_name, created_at, profile, password_hint, description) VALUES (?, ?, ?, ?, ?)`,
+		archiveName, now, profile, passwordHint, description)
 	if err != nil {
 		return 0, err
 	}
@@ -78,6 +79,7 @@ type BackupRecord struct {
 	CreatedAt    string
 	Profile      string
 	PasswordHint string
+	Description  string
 }
 
 // FileRecord represents a row from the files table.
@@ -89,8 +91,8 @@ type FileRecord struct {
 
 func LoadBackupRecord(db *sql.DB) (BackupRecord, error) {
 	var b BackupRecord
-	row := db.QueryRow(`SELECT id, archive_name, profile, created_at, COALESCE(password_hint,'') FROM backups ORDER BY id LIMIT 1`)
-	err := row.Scan(&b.ID, &b.ArchiveName, &b.Profile, &b.CreatedAt, &b.PasswordHint)
+	row := db.QueryRow(`SELECT id, archive_name, profile, created_at, COALESCE(password_hint,''), COALESCE(description,'') FROM backups ORDER BY id LIMIT 1`)
+	err := row.Scan(&b.ID, &b.ArchiveName, &b.Profile, &b.CreatedAt, &b.PasswordHint, &b.Description)
 	return b, err
 }
 

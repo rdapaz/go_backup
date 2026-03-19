@@ -1,6 +1,7 @@
 package core
 
 import (
+	"archive/tar"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 type RestoreConfig struct {
@@ -74,17 +77,123 @@ func RunRestore(cfg RestoreConfig, log LogFunc) (*RestoreResult, error) {
 	return restoreFromStage(stageDirAbs, dstRootAbs, cfg.Workers, log)
 }
 
+// extractArchiveToTemp detects format by extension and extracts accordingly.
 func extractArchiveToTemp(archivePath, password string, log LogFunc) (string, error) {
+	if strings.HasSuffix(strings.ToLower(archivePath), ".tar.zst.enc") {
+		return extractNativeArchive(archivePath, password, log)
+	}
+	// Legacy .7z fallback
+	return extract7zArchive(archivePath, password, log)
+}
+
+// extractNativeArchive extracts a .tar.zst.enc archive using pure Go.
+func extractNativeArchive(archivePath, password string, log LogFunc) (string, error) {
+	log("Decrypting and decompressing archive...")
+
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("open archive: %w", err)
+	}
+	defer f.Close()
+
+	// Read 32-byte salt
+	salt := make([]byte, saltSize)
+	if _, err := io.ReadFull(f, salt); err != nil {
+		return "", fmt.Errorf("read salt: %w", err)
+	}
+
+	// Derive key
+	key, err := DeriveKey(password, salt)
+	if err != nil {
+		return "", fmt.Errorf("derive key: %w", err)
+	}
+
+	// Build decryption pipeline: file → decrypt → zstd → tar
+	decReader, err := NewDecryptReader(f, key)
+	if err != nil {
+		return "", fmt.Errorf("decrypt reader: %w", err)
+	}
+
+	zstdReader, err := zstd.NewReader(decReader)
+	if err != nil {
+		return "", fmt.Errorf("zstd reader: %w", err)
+	}
+	defer zstdReader.Close()
+
+	tarReader := tar.NewReader(zstdReader)
+
+	// Extract to temp directory
+	tempBase, err := os.MkdirTemp("", "backup-restore-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp dir: %w", err)
+	}
+
+	var fileCount int
+	var stageDir string
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("read tar entry: %w", err)
+		}
+
+		// Security: prevent path traversal
+		cleanName := filepath.Clean(header.Name)
+		if strings.Contains(cleanName, "..") {
+			continue
+		}
+
+		target := filepath.Join(tempBase, filepath.FromSlash(cleanName))
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return "", fmt.Errorf("mkdir %s: %w", cleanName, err)
+			}
+			// Track the staging directory (contains backup.db)
+			if stageDir == "" {
+				stageDir = target
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return "", fmt.Errorf("mkdir parent %s: %w", cleanName, err)
+			}
+			outFile, err := os.Create(target)
+			if err != nil {
+				return "", fmt.Errorf("create %s: %w", cleanName, err)
+			}
+			if _, err := io.Copy(outFile, tarReader); err != nil {
+				outFile.Close()
+				return "", fmt.Errorf("extract %s: %w", cleanName, err)
+			}
+			outFile.Close()
+
+			fileCount++
+			if fileCount%1000 == 0 {
+				log(fmt.Sprintf("Extracted %d files...", fileCount))
+			}
+		}
+	}
+
+	log(fmt.Sprintf("Extracted %d files", fileCount))
+
+	// Locate the staging directory with backup.db
+	return locateStageDir(tempBase)
+}
+
+// extract7zArchive uses the legacy 7z executable for .7z archives.
+func extract7zArchive(archivePath, password string, log LogFunc) (string, error) {
 	if _, err := exec.LookPath("7z"); err != nil {
-		return "", fmt.Errorf("7z not found on PATH: %w", err)
+		return "", fmt.Errorf("7z not found on PATH (needed for legacy .7z archives): %w", err)
 	}
 
 	tempBase, err := os.MkdirTemp("", "backup-restore-*")
 	if err != nil {
 		return "", err
 	}
-
-	archiveBase := strings.TrimSuffix(filepath.Base(archivePath), filepath.Ext(archivePath))
 
 	args := []string{
 		"x",
@@ -101,17 +210,17 @@ func extractArchiveToTemp(archivePath, password string, log LogFunc) (string, er
 		return "", fmt.Errorf("7z extract failed: %w\n%s", err, string(output))
 	}
 
-	// Try expected path first
-	stageDir := filepath.Join(tempBase, archiveBase)
-	if _, err := os.Stat(stageDir); err == nil {
-		return stageDir, nil
-	}
+	return locateStageDir(tempBase)
+}
 
-	// Fallback: look for backup.db
+// locateStageDir finds the staging directory containing backup.db.
+func locateStageDir(tempBase string) (string, error) {
+	// Check if backup.db is directly in tempBase
 	if _, err := os.Stat(filepath.Join(tempBase, "backup.db")); err == nil {
 		return tempBase, nil
 	}
 
+	// Look one level deep
 	entries, err := os.ReadDir(tempBase)
 	if err != nil {
 		return "", fmt.Errorf("cannot locate stage dir: %w", err)
@@ -143,6 +252,9 @@ func restoreFromStage(stageDir, dstRoot string, workers int, log LogFunc) (*Rest
 	}
 
 	log(fmt.Sprintf("Backup: %s  Profile: %s  Created: %s", backup.ArchiveName, backup.Profile, backup.CreatedAt))
+	if backup.Description != "" {
+		log(fmt.Sprintf("Description: %s", backup.Description))
+	}
 
 	records, err := LoadFileRecords(db, backup.ID)
 	if err != nil {

@@ -35,11 +35,12 @@ func runBackupCLI(args []string) {
 	var cfg core.BackupConfig
 	fs.StringVar(&cfg.SrcDir, "src", "", "Source root directory to back up")
 	fs.StringVar(&cfg.DstDir, "dst", "", "Destination root directory for backups")
-	fs.StringVar(&cfg.Password, "password", "", "Password for 7z archive (auto-generated if empty)")
+	fs.StringVar(&cfg.Password, "password", "", "Password for archive (auto-generated if empty)")
 	fs.StringVar(&cfg.PasswordHint, "hint", "", "Optional password hint")
+	fs.StringVar(&cfg.Description, "desc", "", "Backup description (e.g. 'Documents backup 2026-01')")
 	fs.StringVar(&cfg.Profile, "profile", core.ProfileAll, "Backup profile: all|documents|jetbrains|databases|photos")
 	fs.IntVar(&cfg.Workers, "workers", runtime.NumCPU(), "Number of concurrent workers")
-	fs.BoolVar(&cfg.KeepStage, "keep-stage", false, "Keep staging directory after 7z creation")
+	fs.BoolVar(&cfg.KeepStage, "keep-stage", false, "Keep staging directory after archive creation")
 	fs.Parse(args)
 
 	if cfg.SrcDir == "" || cfg.DstDir == "" {
@@ -81,10 +82,10 @@ func runRestoreCLI(args []string) {
 	fs := flag.NewFlagSet("restore", flag.ExitOnError)
 
 	var cfg core.RestoreConfig
-	fs.StringVar(&cfg.ArchivePath, "archive", "", "Path to .7z backup archive")
+	fs.StringVar(&cfg.ArchivePath, "archive", "", "Path to .tar.zst.enc or .7z backup archive")
 	fs.StringVar(&cfg.StageDir, "stage", "", "Path to extracted staging directory")
 	fs.StringVar(&cfg.DstDir, "dst", "", "Destination root directory to restore into")
-	fs.StringVar(&cfg.Password, "password", "", "Password for .7z archive")
+	fs.StringVar(&cfg.Password, "password", "", "Password for archive")
 	fs.IntVar(&cfg.Workers, "workers", runtime.NumCPU(), "Number of concurrent workers")
 	fs.Parse(args)
 

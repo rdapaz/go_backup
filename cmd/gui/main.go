@@ -112,6 +112,9 @@ func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 	hintEntry := widget.NewEntry()
 	hintEntry.SetPlaceHolder("Optional password hint")
 
+	descEntry := widget.NewEntry()
+	descEntry.SetPlaceHolder("e.g. Backing up documents 2026-01")
+
 	workersSlider := widget.NewSlider(1, float64(runtime.NumCPU()))
 	workersSlider.Value = float64(runtime.NumCPU())
 	workersSlider.Step = 1
@@ -202,6 +205,7 @@ func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 			Profile:      profile,
 			Password:     passwordEntry.Text,
 			PasswordHint: hintEntry.Text,
+			Description:  strings.TrimSpace(descEntry.Text),
 			Workers:      int(workersSlider.Value),
 			KeepStage:    keepStageCheck.Checked,
 			Blocklist:    blocklist,
@@ -263,9 +267,13 @@ func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 				prefs.SetString("last_stage_dir", result.StageDirPath)
 			}
 
+			// Copy password to clipboard for easy pasting into password managers
+			w.Clipboard().SetContent(result.Password)
+			appendLog("Password copied to clipboard.")
+
 			dialog.ShowInformation("Backup Complete",
-				fmt.Sprintf("Archived %d files to:\n%s\n\nPassword: %s",
-					result.FileCount, result.ArchivePath, result.Password), w)
+				fmt.Sprintf("Archived %d files to:\n%s\n\nPassword copied to clipboard.",
+					result.FileCount, result.ArchivePath), w)
 		}()
 	}
 
@@ -280,6 +288,7 @@ func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 		container.NewBorder(nil, nil, widget.NewLabel("Source:"), srcBrowse, srcEntry),
 		container.NewBorder(nil, nil, widget.NewLabel("Destination:"), dstBrowse, dstEntry),
 		container.NewBorder(nil, nil, widget.NewLabel("Profile:"), blocklistBtn, profileSelect),
+		container.NewBorder(nil, nil, widget.NewLabel("Description:"), nil, descEntry),
 		container.NewBorder(nil, nil, widget.NewLabel("Password:"), nil, passwordEntry),
 		container.NewBorder(nil, nil, widget.NewLabel("Hint:"), nil, hintEntry),
 		container.NewBorder(nil, nil, workersLabel, nil, workersSlider),
@@ -304,7 +313,7 @@ func makeRestoreTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 	modeSelect.SetSelected("From Archive")
 
 	archiveEntry := widget.NewEntry()
-	archiveEntry.SetPlaceHolder("Path to .7z archive")
+	archiveEntry.SetPlaceHolder("Path to .tar.zst.enc or .7z archive")
 	archiveBrowse := widget.NewButtonWithIcon("Browse", theme.FileIcon(), func() {
 		dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
 			if reader != nil {

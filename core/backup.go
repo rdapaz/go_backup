@@ -1,6 +1,7 @@
 package core
 
 import (
+	"archive/tar"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -11,12 +12,13 @@ import (
 	"io/fs"
 	mrand "math/rand"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 type BackupConfig struct {
@@ -25,6 +27,7 @@ type BackupConfig struct {
 	Profile      string
 	Password     string
 	PasswordHint string
+	Description  string // user-provided backup description/label
 	Workers      int
 	KeepStage    bool
 	Blocklist    []string // directory names to skip during walk
@@ -110,7 +113,7 @@ func RunBackup(ctx context.Context, cfg BackupConfig, log LogFunc) (*BackupResul
 		log(fmt.Sprintf("Generated strong password: %s", password))
 	}
 
-	backupID, err := CreateBackupRecord(db, archiveBase, cfg.Profile, cfg.PasswordHint)
+	backupID, err := CreateBackupRecord(db, archiveBase, cfg.Profile, cfg.PasswordHint, cfg.Description)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create backup record: %w", err)
@@ -144,14 +147,14 @@ func RunBackup(ctx context.Context, cfg BackupConfig, log LogFunc) (*BackupResul
 			fmt.Errorf("close db: %w", err)
 	}
 
-	log("File staging complete, creating 7z archive...")
+	log("File staging complete, creating encrypted archive...")
 
-	archivePath := filepath.Join(dstDirAbs, archiveBase+".7z")
-	if err := Create7zArchive(dstDirAbs, archiveBase, archivePath, password, log); err != nil {
-		log(fmt.Sprintf("WARNING: 7z failed but staging directory preserved at: %s", stageDir))
+	archivePath := filepath.Join(dstDirAbs, archiveBase+".tar.zst.enc")
+	if err := CreateArchive(stageDir, archivePath, password, log); err != nil {
+		log(fmt.Sprintf("WARNING: archive creation failed but staging directory preserved at: %s", stageDir))
 		log("You can restore directly from the staging directory using the Restore tab.")
 		return &BackupResult{StageDirPath: stageDir, FileCount: fileCount, Password: password},
-			fmt.Errorf("7z archive: %w", err)
+			fmt.Errorf("create archive: %w", err)
 	}
 
 	log(fmt.Sprintf("Archive created: %s", archivePath))
@@ -446,27 +449,129 @@ func writeResultsToDB(db *sql.DB, backupID int64, results <-chan fileResult, log
 	return count, nil
 }
 
-func Create7zArchive(dstDir, stageFolderName, archivePath, password string, log LogFunc) error {
-	if _, err := exec.LookPath("7z"); err != nil {
-		return fmt.Errorf("7z not found on PATH: %w", err)
-	}
-
-	args := []string{
-		"a", "-t7z",
-		"-p" + password,
-		"-mhe=on",
-		archivePath,
-		stageFolderName,
-	}
-
-	cmd := exec.Command("7z", args...)
-	cmd.Dir = dstDir
-
-	log(fmt.Sprintf("Running: 7z %s", strings.Join(args, " ")))
-	output, err := cmd.CombinedOutput()
+// CreateArchive creates an encrypted compressed archive from a staging directory.
+// Format: [32-byte salt][chunked AES-256-GCM encrypted zstd-compressed tar stream]
+func CreateArchive(stageDir, archivePath, password string, log LogFunc) error {
+	// Generate salt and derive key
+	salt, err := GenerateSalt()
 	if err != nil {
-		return fmt.Errorf("7z failed: %w\n%s", err, string(output))
+		return fmt.Errorf("generate salt: %w", err)
 	}
 
+	key, err := DeriveKey(password, salt)
+	if err != nil {
+		return fmt.Errorf("derive key: %w", err)
+	}
+
+	// Create output file
+	outFile, err := os.Create(archivePath + ".tmp")
+	if err != nil {
+		return fmt.Errorf("create archive: %w", err)
+	}
+	defer func() {
+		outFile.Close()
+		os.Remove(archivePath + ".tmp") // clean up on error
+	}()
+
+	// Write salt as plaintext header
+	if _, err := outFile.Write(salt); err != nil {
+		return fmt.Errorf("write salt: %w", err)
+	}
+
+	// Build streaming pipeline: tar → zstd → encrypt → file
+	encWriter, err := NewEncryptWriter(outFile, key)
+	if err != nil {
+		return fmt.Errorf("encrypt writer: %w", err)
+	}
+
+	zstdWriter, err := zstd.NewWriter(encWriter,
+		zstd.WithEncoderLevel(zstd.SpeedDefault),
+		zstd.WithEncoderConcurrency(runtime.NumCPU()),
+	)
+	if err != nil {
+		return fmt.Errorf("zstd writer: %w", err)
+	}
+
+	tarWriter := tar.NewWriter(zstdWriter)
+
+	// Walk staging directory and add all files
+	log("Compressing and encrypting...")
+	var fileCount int
+	baseName := filepath.Base(stageDir)
+
+	err = filepath.WalkDir(stageDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Build relative path within archive using the staging folder name
+		rel, err := filepath.Rel(filepath.Dir(stageDir), path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = rel
+
+		if d.IsDir() {
+			header.Name += "/"
+			return tarWriter.WriteHeader(header)
+		}
+
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		if _, err := io.Copy(tarWriter, f); err != nil {
+			return err
+		}
+
+		fileCount++
+		if fileCount%1000 == 0 {
+			log(fmt.Sprintf("Compressed %d files...", fileCount))
+		}
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("tar walk: %w", err)
+	}
+
+	// Close pipeline in order: tar → zstd → encrypt → file
+	if err := tarWriter.Close(); err != nil {
+		return fmt.Errorf("close tar: %w", err)
+	}
+	if err := zstdWriter.Close(); err != nil {
+		return fmt.Errorf("close zstd: %w", err)
+	}
+	if err := encWriter.Close(); err != nil {
+		return fmt.Errorf("close encrypt: %w", err)
+	}
+	if err := outFile.Close(); err != nil {
+		return fmt.Errorf("close file: %w", err)
+	}
+
+	// Atomic rename
+	if err := os.Rename(archivePath+".tmp", archivePath); err != nil {
+		return fmt.Errorf("rename archive: %w", err)
+	}
+
+	_ = baseName
+	log(fmt.Sprintf("Archive complete: %d files compressed and encrypted", fileCount))
 	return nil
 }
