@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"image/color"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -39,8 +41,8 @@ func main() {
 }
 
 // crtLog creates a CRT-style green-on-black log display.
-// Returns the container, an append function, and a clear function.
-func crtLog() (fyne.CanvasObject, func(string), func()) {
+// Returns the container, an append function, a clear function, and a save function.
+func crtLog() (fyne.CanvasObject, func(string), func(), func(string) error) {
 	var lines []string
 
 	list := widget.NewList(
@@ -77,7 +79,15 @@ func crtLog() (fyne.CanvasObject, func(string), func()) {
 		list.Refresh()
 	}
 
-	return logContainer, appendFn, clearFn
+	saveFn := func(dir string) error {
+		if len(lines) == 0 {
+			return nil
+		}
+		logPath := filepath.Join(dir, "backup.log")
+		return os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+	}
+
+	return logContainer, appendFn, clearFn, saveFn
 }
 
 // ---------- Backup Tab ----------
@@ -173,18 +183,151 @@ func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 	}
 
 	// CRT-style log
-	logContainer, appendLog, clearLog := crtLog()
+	logContainer, appendLog, clearLog, saveLog := crtLog()
 
 	progress := widget.NewProgressBarInfinite()
 	progress.Hide()
 
 	var cancelFunc context.CancelFunc
+	var skipCount int
+	var lastLogDir string
 
 	statusLabel := widget.NewLabel("Ready")
 
 	startBtn := widget.NewButtonWithIcon("Start Backup", theme.MediaPlayIcon(), nil)
 	cancelBtn := widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), nil)
 	cancelBtn.Disable()
+
+	// "View Log" button — hidden until failure
+	viewLogBtn := widget.NewButtonWithIcon("View Log", theme.FileTextIcon(), nil)
+	viewLogBtn.Hide()
+	viewLogBtn.OnTapped = func() {
+		if lastLogDir != "" {
+			logPath := filepath.Join(lastLogDir, "backup.log")
+			if _, err := os.Stat(logPath); err == nil {
+				data, err := os.ReadFile(logPath)
+				if err != nil {
+					dialog.ShowError(fmt.Errorf("cannot read log: %w", err), w)
+					return
+				}
+
+				logText := widget.NewMultiLineEntry()
+				logText.SetText(string(data))
+				logText.Wrapping = fyne.TextWrapOff
+				logText.Disable() // read-only
+
+				d := dialog.NewCustom("Backup Log — "+logPath, "Close",
+					container.NewScroll(logText), w)
+				d.Resize(fyne.NewSize(700, 500))
+				d.Show()
+			}
+		}
+	}
+
+	// Extracted backup runner (declared early for forward reference from disk check)
+	var runBackup func(core.BackupConfig)
+	runBackup = func(cfg core.BackupConfig) {
+		clearLog()
+		skipCount = 0
+		viewLogBtn.Hide()
+		progress.Show()
+		startBtn.Disable()
+		cancelBtn.Enable()
+		statusLabel.SetText("Backing up...")
+
+		var ctx context.Context
+		ctx, cancelFunc = context.WithCancel(context.Background())
+
+		go func() {
+			result, err := core.RunBackup(ctx, cfg, func(msg string) {
+				// Count skipped files for end-of-run summary
+				if strings.HasPrefix(msg, "Skipping") {
+					skipCount++
+				}
+				appendLog(msg)
+			})
+
+			progress.Hide()
+			cancelBtn.Disable()
+			startBtn.Enable()
+
+			// End-of-run summary
+			if skipCount > 0 {
+				appendLog(fmt.Sprintf("--- Summary: %d file(s) skipped due to errors ---", skipCount))
+			}
+
+			if err != nil {
+				if ctx.Err() != nil {
+					statusLabel.SetText("Cancelled")
+					appendLog("Backup cancelled by user.")
+				} else {
+					statusLabel.SetText("Failed")
+					appendLog(fmt.Sprintf("ERROR: %v", err))
+
+					// If we have a staging directory, tell the user and save for restore tab
+					if result != nil && result.StageDirPath != "" {
+						prefs.SetString("last_stage_dir", result.StageDirPath)
+						if result.Password != "" {
+							prefs.SetString("last_password", result.Password)
+						}
+						appendLog(fmt.Sprintf("Staging directory preserved at: %s", result.StageDirPath))
+						appendLog("You can restore from this using the Restore tab → 'From Staging Directory'.")
+
+						// Save log to staging directory
+						lastLogDir = result.StageDirPath
+						if saveErr := saveLog(result.StageDirPath); saveErr != nil {
+							appendLog(fmt.Sprintf("Warning: could not save log file: %v", saveErr))
+						} else {
+							appendLog(fmt.Sprintf("Log saved to: %s", filepath.Join(result.StageDirPath, "backup.log")))
+						}
+
+						viewLogBtn.Show()
+
+						dialog.ShowInformation("Backup Failed — Staging Preserved",
+							fmt.Sprintf("The backup failed but %d files were staged to:\n%s\n\nYou can restore from this directory using the Restore tab.",
+								result.FileCount, result.StageDirPath), w)
+					} else {
+						// No staging dir — save log to destination directory
+						lastLogDir = cfg.DstDir
+						if saveErr := saveLog(cfg.DstDir); saveErr == nil {
+							appendLog(fmt.Sprintf("Log saved to: %s", filepath.Join(cfg.DstDir, "backup.log")))
+						}
+						viewLogBtn.Show()
+					}
+				}
+				return
+			}
+
+			statusLabel.SetText("Complete")
+			appendLog(fmt.Sprintf("Backup complete! %d files archived.", result.FileCount))
+			appendLog(fmt.Sprintf("Archive: %s", result.ArchivePath))
+			if cfg.Password == "" {
+				appendLog(fmt.Sprintf("Generated password: %s", result.Password))
+			}
+
+			// Save log alongside archive
+			archiveDir := filepath.Dir(result.ArchivePath)
+			lastLogDir = archiveDir
+			if saveErr := saveLog(archiveDir); saveErr == nil {
+				appendLog(fmt.Sprintf("Log saved to: %s", filepath.Join(archiveDir, "backup.log")))
+			}
+
+			// Save last backup details for restore tab
+			prefs.SetString("last_archive", result.ArchivePath)
+			prefs.SetString("last_password", result.Password)
+			if result.StageDirPath != "" {
+				prefs.SetString("last_stage_dir", result.StageDirPath)
+			}
+
+			// Copy password to clipboard for easy pasting into password managers
+			w.Clipboard().SetContent(result.Password)
+			appendLog("Password copied to clipboard.")
+
+			dialog.ShowInformation("Backup Complete",
+				fmt.Sprintf("Archived %d files to:\n%s\n\nPassword copied to clipboard.",
+					result.FileCount, result.ArchivePath), w)
+		}()
+	}
 
 	startBtn.OnTapped = func() {
 		src := strings.TrimSpace(srcEntry.Text)
@@ -211,69 +354,39 @@ func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 			Blocklist:    blocklist,
 		}
 
+		// Pre-flight: estimate source size vs free disk space
 		clearLog()
-		progress.Show()
+		statusLabel.SetText("Estimating size...")
 		startBtn.Disable()
-		cancelBtn.Enable()
-		statusLabel.SetText("Backing up...")
-
-		var ctx context.Context
-		ctx, cancelFunc = context.WithCancel(context.Background())
 
 		go func() {
-			result, err := core.RunBackup(ctx, cfg, func(msg string) {
-				appendLog(msg)
-			})
+			srcSize, srcFiles, err := core.EstimateSourceSize(src, profile, blocklist)
+			if err == nil && srcSize > 0 {
+				du, duErr := core.FreeDiskSpace(dst)
+				if duErr == nil {
+					appendLog(fmt.Sprintf("Source: ~%s (%d files)  |  Destination free: %s",
+						core.FormatBytes(srcSize), srcFiles, core.FormatBytes(du.Free)))
 
-			progress.Hide()
-			cancelBtn.Disable()
-			startBtn.Enable()
-
-			if err != nil {
-				if ctx.Err() != nil {
-					statusLabel.SetText("Cancelled")
-					appendLog("Backup cancelled by user.")
-				} else {
-					statusLabel.SetText("Failed")
-					appendLog(fmt.Sprintf("ERROR: %v", err))
-
-					// If we have a staging directory, tell the user and save for restore tab
-					if result != nil && result.StageDirPath != "" {
-						prefs.SetString("last_stage_dir", result.StageDirPath)
-						if result.Password != "" {
-							prefs.SetString("last_password", result.Password)
-						}
-						appendLog(fmt.Sprintf("Staging directory preserved at: %s", result.StageDirPath))
-						appendLog("You can restore from this using the Restore tab → 'From Staging Directory'.")
-						dialog.ShowInformation("Backup Failed — Staging Preserved",
-							fmt.Sprintf("The backup failed but %d files were staged to:\n%s\n\nYou can restore from this directory using the Restore tab.",
-								result.FileCount, result.StageDirPath), w)
+					// Need space for staging + archive (roughly 2x source before compression,
+					// but compression typically brings it well under 1x; use 1.2x as safety margin)
+					needed := uint64(float64(srcSize) * 1.2)
+					if needed > du.Free {
+						startBtn.Enable()
+						statusLabel.SetText("Ready")
+						dialog.ShowConfirm("Insufficient Disk Space",
+							fmt.Sprintf("Estimated backup size: %s\nFree space on destination: %s\n\n"+
+								"The backup may not fit. Continue anyway?",
+								core.FormatBytes(srcSize), core.FormatBytes(du.Free)),
+							func(proceed bool) {
+								if proceed {
+									runBackup(cfg)
+								}
+							}, w)
+						return
 					}
 				}
-				return
 			}
-
-			statusLabel.SetText("Complete")
-			appendLog(fmt.Sprintf("Backup complete! %d files archived.", result.FileCount))
-			appendLog(fmt.Sprintf("Archive: %s", result.ArchivePath))
-			if cfg.Password == "" {
-				appendLog(fmt.Sprintf("Generated password: %s", result.Password))
-			}
-
-			// Save last backup details for restore tab
-			prefs.SetString("last_archive", result.ArchivePath)
-			prefs.SetString("last_password", result.Password)
-			if result.StageDirPath != "" {
-				prefs.SetString("last_stage_dir", result.StageDirPath)
-			}
-
-			// Copy password to clipboard for easy pasting into password managers
-			w.Clipboard().SetContent(result.Password)
-			appendLog("Password copied to clipboard.")
-
-			dialog.ShowInformation("Backup Complete",
-				fmt.Sprintf("Archived %d files to:\n%s\n\nPassword copied to clipboard.",
-					result.FileCount, result.ArchivePath), w)
+			runBackup(cfg)
 		}()
 	}
 
@@ -295,7 +408,7 @@ func makeBackupTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 		keepStageCheck,
 	)
 
-	buttons := container.NewHBox(startBtn, cancelBtn, layout.NewSpacer(), statusLabel)
+	buttons := container.NewHBox(startBtn, cancelBtn, viewLogBtn, layout.NewSpacer(), statusLabel)
 
 	return container.NewBorder(
 		container.NewVBox(form, buttons, progress),
@@ -383,7 +496,7 @@ func makeRestoreTab(a fyne.App, w fyne.Window) fyne.CanvasObject {
 	}
 
 	// CRT-style log
-	logContainer, appendLog, clearLog := crtLog()
+	logContainer, appendLog, clearLog, _ := crtLog()
 
 	progress := widget.NewProgressBarInfinite()
 	progress.Hide()
