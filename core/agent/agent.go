@@ -100,15 +100,23 @@ func (a *Agent) sendHeartbeat() {
 }
 
 func (a *Agent) handleBackupCommand(cmd BackupCommand) {
-	if cmd.Action != "start_backup" || cmd.Config == nil {
-		log.Printf("[agent] ignoring command action=%s", cmd.Action)
+	if cmd.Config == nil {
+		log.Printf("[agent] ignoring command with nil config, action=%s", cmd.Action)
 		return
 	}
 
-	log.Printf("[agent] received backup command: profile=%s src=%s",
-		cmd.Config.Profile, cmd.Config.SrcDir)
-
-	go a.executeBackup(cmd)
+	switch cmd.Action {
+	case "start_backup":
+		log.Printf("[agent] received backup command: profile=%s src=%s",
+			cmd.Config.Profile, cmd.Config.SrcDir)
+		go a.executeBackup(cmd)
+	case "start_restore":
+		log.Printf("[agent] received restore command: archive=%s dst=%s",
+			cmd.Config.ArchivePath, cmd.Config.DstDir)
+		go a.executeRestore(cmd)
+	default:
+		log.Printf("[agent] ignoring unknown command action=%s", cmd.Action)
+	}
 }
 
 func (a *Agent) executeScheduledBackup(cmd BackupCommand) {
@@ -160,8 +168,52 @@ func (a *Agent) executeBackupWithMethod(cmd BackupCommand, method string) {
 	} else {
 		status.Status = "success"
 		status.ArchivePath = result.ArchivePath
+		status.ArchivePassword = result.Password
 		status.FileCount = result.FileCount
 		log.Printf("[agent] backup complete: %d files -> %s", result.FileCount, result.ArchivePath)
+	}
+
+	a.reportStatus(status)
+}
+
+func (a *Agent) executeRestore(cmd BackupCommand) {
+	cfg := core.RestoreConfig{
+		ArchivePath: cmd.Config.ArchivePath,
+		DstDir:      cmd.Config.DstDir,
+		Password:    cmd.Config.Password,
+		Workers:     cmd.Config.Workers,
+	}
+
+	if cfg.Workers <= 0 {
+		cfg.Workers = 4
+	}
+
+	startedAt := time.Now().UTC().Format(time.RFC3339)
+
+	logFn := func(msg string) {
+		log.Printf("[restore] %s", msg)
+	}
+
+	result, err := core.RunRestore(cfg, logFn)
+
+	completedAt := time.Now().UTC().Format(time.RFC3339)
+
+	status := BackupStatus{
+		CommandID:   cmd.CommandID,
+		Method:      "orchestrator",
+		Profile:     "restore",
+		StartedAt:   startedAt,
+		CompletedAt: completedAt,
+	}
+
+	if err != nil {
+		status.Status = "failure"
+		status.ErrorMessage = err.Error()
+		log.Printf("[agent] restore failed: %v", err)
+	} else {
+		status.Status = "success"
+		status.FileCount = int64(result.FileCount)
+		log.Printf("[agent] restore complete: %d files", result.FileCount)
 	}
 
 	a.reportStatus(status)

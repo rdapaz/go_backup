@@ -77,6 +77,7 @@ type BackupCommandConfig struct {
 	Description  string   `json:"description"`
 	Workers      int      `json:"workers"`
 	Blocklist    []string `json:"blocklist"`
+	ArchivePath  string   `json:"archive_path,omitempty"` // for restore
 }
 
 type BackupCommand struct {
@@ -88,15 +89,16 @@ type BackupCommand struct {
 // -- Backup Status ---------------------------------------------------------------
 
 type BackupStatus struct {
-	CommandID    string `json:"command_id"`
-	Status       string `json:"status"`        // success / failure / in_progress / cancelled
-	Method       string `json:"method"`        // orchestrator / manual / scheduled
-	Profile      string `json:"profile"`
-	StartedAt    string `json:"started_at"`
-	CompletedAt  string `json:"completed_at"`
-	ArchivePath  string `json:"archive_path"`
-	FileCount    int64  `json:"file_count"`
-	ErrorMessage string `json:"error_message"`
+	CommandID       string `json:"command_id"`
+	Status          string `json:"status"`        // success / failure / in_progress / cancelled
+	Method          string `json:"method"`        // orchestrator / manual / scheduled
+	Profile         string `json:"profile"`
+	StartedAt       string `json:"started_at"`
+	CompletedAt     string `json:"completed_at"`
+	ArchivePath     string `json:"archive_path"`
+	ArchivePassword string `json:"archive_password,omitempty"` // sent securely for orchestrator storage
+	FileCount       int64  `json:"file_count"`
+	ErrorMessage    string `json:"error_message"`
 }
 
 // -- Schedule Sync ---------------------------------------------------------------
