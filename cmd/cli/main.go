@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -157,7 +158,8 @@ func runRegisterCLI(args []string) {
 	// Store broker config
 	cfg.Set("broker_address", broker)
 	cfg.Set("broker_port", fmt.Sprintf("%d", port))
-	cfg.Set("config_db_path", configDB)
+	absConfigDB, _ := filepath.Abs(configDB)
+	cfg.Set("config_db_path", absConfigDB)
 
 	// Get hostname and OS info
 	hostname, _ := os.Hostname()
@@ -184,9 +186,12 @@ func runRegisterCLI(args []string) {
 		done <- true
 	})
 
-	// Get local IP (best effort)
+	// Get local IP by dialling the broker (best effort)
 	ipAddr := "unknown"
-	// Simple approach: use hostname resolution
+	if conn, dialErr := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", broker, port), 3*time.Second); dialErr == nil {
+		ipAddr = conn.LocalAddr().(*net.TCPAddr).IP.String()
+		conn.Close()
+	}
 	fmt.Printf("Sending registration request to %s:%d...\n", broker, port)
 
 	reg := agent.RegistrationRequest{

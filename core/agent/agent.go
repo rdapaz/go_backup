@@ -111,7 +111,15 @@ func (a *Agent) handleBackupCommand(cmd BackupCommand) {
 	go a.executeBackup(cmd)
 }
 
+func (a *Agent) executeScheduledBackup(cmd BackupCommand) {
+	a.executeBackupWithMethod(cmd, "scheduled")
+}
+
 func (a *Agent) executeBackup(cmd BackupCommand) {
+	a.executeBackupWithMethod(cmd, "orchestrator")
+}
+
+func (a *Agent) executeBackupWithMethod(cmd BackupCommand, method string) {
 	cfg := core.BackupConfig{
 		SrcDir:       cmd.Config.SrcDir,
 		DstDir:       cmd.Config.DstDir,
@@ -139,7 +147,7 @@ func (a *Agent) executeBackup(cmd BackupCommand) {
 
 	status := BackupStatus{
 		CommandID:   cmd.CommandID,
-		Method:      "orchestrator",
+		Method:      method,
 		Profile:     cfg.Profile,
 		StartedAt:   startedAt,
 		CompletedAt: completedAt,
@@ -211,10 +219,14 @@ func (a *Agent) syncPendingReports() {
 
 func (a *Agent) handleScheduleSync(sync ScheduleSync) {
 	log.Printf("[agent] received schedule sync: %d schedules", len(sync.Schedules))
+	for i, s := range sync.Schedules {
+		log.Printf("[agent]   schedule[%d]: id=%d profile=%s cron=%s enabled=%v", i, s.ID, s.Profile, s.CronExpr, s.Enabled)
+	}
 	if err := a.config.SyncSchedules(sync.Schedules); err != nil {
 		log.Printf("[agent] failed to sync schedules: %v", err)
 		return
 	}
+	log.Printf("[agent] schedules saved to local db, updating task scheduler...")
 	if err := a.UpdateTaskScheduler(); err != nil {
 		log.Printf("[agent] failed to update task scheduler: %v", err)
 	}
@@ -223,6 +235,18 @@ func (a *Agent) handleScheduleSync(sync ScheduleSync) {
 // RunSchedule executes a single scheduled backup by schedule ID.
 // This is called by Windows Task Scheduler.
 func (a *Agent) RunSchedule(scheduleID int) error {
+	// Ensure context is initialised (Run() is not called in one-shot mode)
+	if a.ctx == nil {
+		a.ctx, a.cancelFn = context.WithCancel(context.Background())
+	}
+
+	// Connect to MQTT for status reporting (best-effort)
+	a.mqtt.SetCommandHandler(func(cmd BackupCommand) {})
+	a.mqtt.SetScheduleHandler(func(sync ScheduleSync) {})
+	if err := a.mqtt.Connect(); err != nil {
+		log.Printf("[agent] broker unavailable, will queue status: %v", err)
+	}
+
 	sched, err := a.config.GetLocalSchedule(scheduleID)
 	if err != nil {
 		return fmt.Errorf("schedule %d not found: %w", scheduleID, err)
@@ -247,7 +271,11 @@ func (a *Agent) RunSchedule(scheduleID int) error {
 	}
 
 	// Execute synchronously (Task Scheduler waits for completion)
-	a.executeBackup(cmd)
+	a.executeScheduledBackup(cmd)
+
+	// Clean up
+	a.mqtt.Disconnect()
+	a.config.Close()
 	return nil
 }
 
