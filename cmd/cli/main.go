@@ -5,16 +5,21 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"mybackup/core"
+	"mybackup/core/agent"
+
+	"github.com/google/uuid"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: backup-cli <backup|restore> [flags]")
+		fmt.Fprintln(os.Stderr, "Usage: backup-cli <backup|restore|register|agent> [flags]")
 		os.Exit(1)
 	}
 
@@ -23,8 +28,12 @@ func main() {
 		runBackupCLI(os.Args[2:])
 	case "restore":
 		runRestoreCLI(os.Args[2:])
+	case "register":
+		runRegisterCLI(os.Args[2:])
+	case "agent":
+		runAgentCLI(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\nUsage: backup-cli <backup|restore> [flags]\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\nUsage: backup-cli <backup|restore|register|agent> [flags]\n", os.Args[1])
 		os.Exit(1)
 	}
 }
@@ -114,4 +123,168 @@ func runRestoreCLI(args []string) {
 	}
 
 	fmt.Printf("Restore complete: %d files\n", result.FileCount)
+}
+
+func runRegisterCLI(args []string) {
+	fs := flag.NewFlagSet("register", flag.ExitOnError)
+
+	var broker string
+	var port int
+	var configDB string
+	fs.StringVar(&broker, "broker", "localhost", "MQTT broker hostname or IP")
+	fs.IntVar(&port, "port", 1883, "MQTT broker port")
+	fs.StringVar(&configDB, "config-db", "agent.db", "Path to agent config database")
+	fs.Parse(args)
+
+	// Open or create config database
+	cfg, err := agent.OpenConfig(configDB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open config database: %v\n", err)
+		os.Exit(1)
+	}
+	defer cfg.Close()
+
+	// Generate or retrieve client UUID
+	clientUUID := cfg.Get("client_uuid", "")
+	if clientUUID == "" {
+		clientUUID = uuid.New().String()
+		cfg.Set("client_uuid", clientUUID)
+		fmt.Printf("Generated client UUID: %s\n", clientUUID)
+	} else {
+		fmt.Printf("Using existing client UUID: %s\n", clientUUID)
+	}
+
+	// Store broker config
+	cfg.Set("broker_address", broker)
+	cfg.Set("broker_port", fmt.Sprintf("%d", port))
+	cfg.Set("config_db_path", configDB)
+
+	// Get hostname and OS info
+	hostname, _ := os.Hostname()
+	osInfo := fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
+
+	// Connect to broker (no auth for registration)
+	mqttClient := agent.NewMqttClient(broker, port, "", "", clientUUID)
+	if err := mqttClient.Connect(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to connect to broker at %s:%d: %v\n", broker, port, err)
+		os.Exit(1)
+	}
+
+	// Listen for registration response
+	done := make(chan bool, 1)
+	mqttClient.SubscribeRegistrationResponse(func(resp agent.RegistrationResponse) {
+		if resp.Approved {
+			fmt.Printf("Registration approved! Name: %s\n", resp.ClientName)
+			cfg.Set("mqtt_username", resp.MqttUsername)
+			cfg.Set("mqtt_password", resp.MqttPassword)
+			fmt.Println("MQTT credentials stored in config database.")
+		} else {
+			fmt.Println("Registration denied by orchestrator.")
+		}
+		done <- true
+	})
+
+	// Get local IP (best effort)
+	ipAddr := "unknown"
+	// Simple approach: use hostname resolution
+	fmt.Printf("Sending registration request to %s:%d...\n", broker, port)
+
+	reg := agent.RegistrationRequest{
+		ClientUUID:      clientUUID,
+		Hostname:        hostname,
+		IPAddress:       ipAddr,
+		OS:              osInfo,
+		GoBackupVersion: "1.0.0",
+	}
+
+	if err := mqttClient.PublishRegistration(reg); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to send registration: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Registration request sent. Waiting for approval (60s timeout)...")
+
+	select {
+	case <-done:
+		// Response received
+	case <-time.After(60 * time.Second):
+		fmt.Println("Timeout waiting for registration response.")
+		fmt.Println("The orchestrator admin needs to approve the registration.")
+		fmt.Println("You can try again later with the same command.")
+	}
+
+	mqttClient.Disconnect()
+}
+
+func runAgentCLI(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: backup-cli agent <start|run-schedule> [flags]")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "start":
+		runAgentStart(args[1:])
+	case "run-schedule":
+		runAgentRunSchedule(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown agent command: %s\nUsage: backup-cli agent <start|run-schedule> [flags]\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func runAgentStart(args []string) {
+	fs := flag.NewFlagSet("agent start", flag.ExitOnError)
+	var configDB string
+	fs.StringVar(&configDB, "config-db", "agent.db", "Path to agent config database")
+	fs.Parse(args)
+
+	a, err := agent.NewAgent(configDB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start agent: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Handle graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Println("\nShutting down agent...")
+		a.Stop()
+	}()
+
+	fmt.Println("Agent starting...")
+	if err := a.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Agent error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runAgentRunSchedule(args []string) {
+	fs := flag.NewFlagSet("agent run-schedule", flag.ExitOnError)
+	var configDB string
+	var scheduleID int
+	fs.StringVar(&configDB, "config-db", "agent.db", "Path to agent config database")
+	fs.IntVar(&scheduleID, "id", 0, "Schedule ID to execute")
+	fs.Parse(args)
+
+	if scheduleID <= 0 {
+		fmt.Fprintln(os.Stderr, "-id is required and must be positive")
+		os.Exit(1)
+	}
+
+	a, err := agent.NewAgent(configDB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create agent: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Connect to MQTT briefly for status reporting
+	// Agent will queue the report if connection fails (offline resilience)
+
+	if err := a.RunSchedule(scheduleID); err != nil {
+		fmt.Fprintf(os.Stderr, "Schedule execution failed: %v\n", err)
+		os.Exit(1)
+	}
 }
