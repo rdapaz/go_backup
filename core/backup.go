@@ -294,6 +294,9 @@ func ShouldBackup(path string, profile string) bool {
 	case ProfilePhotos:
 		_, ok := PhotoExts[ext]
 		return ok
+	case ProfileEbooks:
+		_, ok := EbookExts[ext]
+		return ok
 	case ProfileJetBrains:
 		if _, skip := JBExcludeFileNames[filepath.Base(path)]; skip {
 			return false

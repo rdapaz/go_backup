@@ -5,10 +5,11 @@ const (
 	ProfileJetBrains = "jetbrains"
 	ProfileDatabases = "databases"
 	ProfilePhotos    = "photos"
+	ProfileEbooks    = "ebooks"
 	ProfileAll       = "all"
 )
 
-var ValidProfiles = []string{ProfileAll, ProfileDocuments, ProfileJetBrains, ProfileDatabases, ProfilePhotos}
+var ValidProfiles = []string{ProfileAll, ProfileDocuments, ProfileJetBrains, ProfileDatabases, ProfilePhotos, ProfileEbooks}
 
 var DocumentExts = map[string]struct{}{
 	".doc":  {},
@@ -41,6 +42,23 @@ var PhotoExts = map[string]struct{}{
 	".gif":  {},
 	".heic": {},
 	".heif": {},
+	".webp": {},
+	".raw":  {},
+	".cr2":  {},
+	".nef":  {},
+	".arw":  {},
+	".dng":  {},
+	".svg":  {},
+}
+
+var EbookExts = map[string]struct{}{
+	".epub": {},
+	".mobi": {},
+	".azw":  {},
+	".azw3": {},
+	".pdf":  {},
+	".cbz":  {},
+	".cbr":  {},
 }
 
 var JBExcludeDirNames = map[string]struct{}{
@@ -65,7 +83,7 @@ var JBExcludeFileNames = map[string]struct{}{
 
 func IsValidProfile(p string) bool {
 	switch p {
-	case ProfileDocuments, ProfileJetBrains, ProfileDatabases, ProfilePhotos, ProfileAll:
+	case ProfileDocuments, ProfileJetBrains, ProfileDatabases, ProfilePhotos, ProfileEbooks, ProfileAll:
 		return true
 	}
 	return false
