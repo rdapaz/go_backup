@@ -46,7 +46,7 @@ func (a *Agent) UpdateTaskScheduler() error {
 		}
 
 		// Convert cron to schtasks schedule
-		schedType, schedMod := cronToSchtasks(sched.CronExpr)
+		schedType, schedMod, schedDay := cronToSchtasks(sched.CronExpr)
 		if schedType == "" {
 			log.Printf("[scheduler] unsupported cron expression for schedule %d: %s", sched.ID, sched.CronExpr)
 			continue
@@ -61,7 +61,9 @@ func (a *Agent) UpdateTaskScheduler() error {
 			"/TR", cmdLine,
 			"/SC", schedType,
 		}
-		if schedMod != "" {
+		if schedType == "WEEKLY" && schedDay != "" {
+			cmdArgs = append(cmdArgs, "/D", schedDay)
+		} else if schedMod != "" {
 			cmdArgs = append(cmdArgs, "/MO", schedMod)
 		}
 		cmdArgs = append(cmdArgs, "/ST", cronStartTime(sched.CronExpr))
@@ -118,10 +120,10 @@ func deleteTask(name string) {
 
 // cronToSchtasks converts a cron expression to schtasks /SC and /MO values.
 // Supports common patterns. Returns ("", "") for unsupported expressions.
-func cronToSchtasks(cron string) (schedType, modifier string) {
+func cronToSchtasks(cron string) (schedType, modifier, day string) {
 	parts := strings.Fields(cron)
 	if len(parts) != 5 {
-		return "", ""
+		return "", "", ""
 	}
 
 	minute, hour, dom, _, dow := parts[0], parts[1], parts[2], parts[3], parts[4]
@@ -129,13 +131,13 @@ func cronToSchtasks(cron string) (schedType, modifier string) {
 
 	// Daily: "0 2 * * *"
 	if dom == "*" && dow == "*" && !strings.Contains(hour, "/") && !strings.Contains(hour, ",") {
-		return "DAILY", ""
+		return "DAILY", "", ""
 	}
 
 	// Every N days: "0 2 */N * *"
 	if strings.HasPrefix(dom, "*/") && dow == "*" {
 		n := strings.TrimPrefix(dom, "*/")
-		return "DAILY", n
+		return "DAILY", n, ""
 	}
 
 	// Weekly: "0 3 * * 0" (specific day of week)
@@ -144,26 +146,26 @@ func cronToSchtasks(cron string) (schedType, modifier string) {
 			"0": "SUN", "1": "MON", "2": "TUE", "3": "WED",
 			"4": "THU", "5": "FRI", "6": "SAT", "7": "SUN",
 		}
-		if day, ok := dayMap[dow]; ok {
-			return "WEEKLY", day
+		if d, ok := dayMap[dow]; ok {
+			return "WEEKLY", "", d
 		}
 	}
 
 	// Monthly on specific days: "0 2 1 * *" or "0 2 1,15 * *"
 	if dom != "*" && dow == "*" {
-		return "MONTHLY", dom
+		return "MONTHLY", dom, ""
 	}
 
 	// Hourly: "0 * * * *" or "0 */N * * *"
 	if hour == "*" && dom == "*" && dow == "*" {
-		return "HOURLY", ""
+		return "HOURLY", "", ""
 	}
 	if strings.HasPrefix(hour, "*/") && dom == "*" && dow == "*" {
 		n := strings.TrimPrefix(hour, "*/")
-		return "HOURLY", n
+		return "HOURLY", n, ""
 	}
 
-	return "", ""
+	return "", "", ""
 }
 
 // cronStartTime extracts the start time (HH:MM) from a cron expression.
